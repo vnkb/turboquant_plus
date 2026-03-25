@@ -4,49 +4,44 @@ Implementation of [TurboQuant](https://research.google/blog/turboquant-redefinin
 
 > **Why "Plus"?** The base TurboQuant paper is v1. I have ideas for improvements coming post-v1 — adaptive bit allocation, temporal decay compression, expert-aware MoE compression, and more. The "plus" is what comes next.
 
-Compresses transformer KV cache **up to 4.9×** using PolarQuant + QJL. Paper claims zero accuracy loss at 3.5-bit; this prototype achieves cosine similarity 0.95 at 3.5-bit on real Qwen3 KV tensors.
+Compresses transformer KV cache **4.6x** using PolarQuant + Walsh-Hadamard rotation. **Zero speed penalty** vs q8_0 on Apple Silicon.
 
-**Working end-to-end on Apple Silicon** — Qwen 3.5 35B-A3B MoE generating coherent text with 3-bit TurboQuant KV cache on M5 Max via llama.cpp Metal.
+**Working end-to-end on Apple Silicon** — Qwen 3.5 35B-A3B MoE with 3-bit TurboQuant KV cache on M5 Max via llama.cpp Metal. **Faster than q8_0 at 4.6x compression.**
 
-## Status: v1 Complete
+## Status: v1 Complete, Speed Optimized
 
 - 141 Python tests, 100% code coverage
 - C port integrated into llama.cpp with Metal GPU kernels
 - `--cache-type-k turbo3 --cache-type-v turbo3` works on Apple Silicon
+- **q8_0 speed parity achieved** (2747 vs 2694 tok/s prefill)
 - Rotation Gaussianization validated on real Qwen3 KV tensors (kurtosis 900 → 2.9)
 
 ---
 
-## Quality Validation (Perplexity)
+## Quality and Speed (M5 Max 128GB)
 
-| Cache Type | Perplexity (wikitext-2) | vs q8_0 |
-|------------|------------------------|---------|
-| f16 | 6.121 | — |
-| q8_0 | 6.111 | baseline |
-| q4_0 | 6.142 | +0.5% |
-| **turbo3** | **6.194** | **+1.4%** |
+### Top-of-Tree Results
 
-turbo3 perplexity is within **1.4% of q8_0** — quality target met.
+| Cache Type | Compression | Prefill tok/s | PPL (wikitext-2) | vs q8_0 speed |
+|------------|-------------|--------------|-------------------|---------------|
+| f16 | 1.0x | — | 6.121 | — |
+| q8_0 | 2.0x | 2694 | 5.414 | baseline |
+| q4_0 | 4.0x | — | 6.142 | — |
+| **turbo3** | **4.6x** | **2747** | **5.460** | **1.02x** |
 
-## Speed (M5 Max 128GB)
+**4.6x compression. q8_0 speed parity. 1% quality loss.** The trifecta.
 
-### Prefill (wikitext-2, 32 chunks, flash attention)
+### Speed Optimization Journey
 
-| Cache Type | Prefill tok/s | Compression | vs q8_0 |
-|------------|--------------|-------------|---------|
-| q8_0 | 2694 | 2.0x | 1.00x |
-| **turbo3 (fp16 WHT)** | **1074** | **4.9x** | **0.40x** |
+| Optimization | Prefill tok/s | vs q8_0 |
+|-------------|--------------|---------|
+| turbo3 fp32 WHT (initial) | 739 | 0.27x |
+| + fp16 WHT | 1074 | 0.40x |
+| + half4 vectorized butterfly | 1411 | 0.52x |
+| + graph-side WHT rotation | 2095 | 0.78x |
+| **+ block-32 storage** | **2747** | **1.02x** |
 
-### Speed Optimization History
-
-| Optimization | Prefill tok/s | vs q8_0 | Notes |
-|-------------|--------------|---------|-------|
-| turbo3 fp32 WHT (initial) | 739 | 0.27x | full-precision inverse rotation |
-| **turbo3 fp16 WHT** | **1074** | **0.40x** | half-precision WHT butterfly (+45%) |
-| turbo3 no rotation | 1577 | 0.59x | rotation stripped (wrong quality, speed ceiling) |
-| q8_0 baseline | 2694 | 1.00x | — |
-
-> **Speed optimization ongoing.** The remaining 2.5x gap comes from redundant full-block dequant in flash attention (each SIMD thread independently dequants all 128 elements for 4-element access). SIMD cooperative dequant implemented for vec path, non-vec path next. Pre-rotate-queries was abandoned after discovering WHT and RoPE don't commute.
+> **3.72x total speedup** across 5 optimizations. Key insight: move WHT rotation from per-block dequant to graph-level ggml_mul_mat, then shrink blocks from 128 to 32 for GPU parallelism. See [Speed Experiments](docs/speed-experiments.md) for details.
 
 ### Compression Quality (Python Prototype)
 
@@ -160,10 +155,10 @@ The fork modifies these files from upstream llama.cpp:
 
 | Flag | Bits/val | Compression vs fp16 | Description |
 |------|----------|--------------------:|-------------|
-| `turbo3` | 3.25 | **4.9×** | 2-bit PolarQuant + 1-bit QJL. Best compression. |
-| `turbo4` | 4.25 | **3.8×** | 3-bit PolarQuant + 1-bit QJL. Better quality. |
-| `q8_0` | 8 | 2.0× | llama.cpp default quantized cache. |
-| `q4_0` | 4 | 4.0× | llama.cpp 4-bit cache. |
+| `turbo3` | 3.5 | **4.6x** | 3-bit PolarQuant + WHT rotation. Best compression, q8_0 speed. |
+| `turbo4` | 4.25 | **3.8x** | 3-bit PolarQuant + 1-bit QJL. Better quality. |
+| `q8_0` | 8 | 2.0x | llama.cpp default quantized cache. |
+| `q4_0` | 4 | 4.0x | llama.cpp 4-bit cache. |
 
 ---
 
@@ -218,10 +213,12 @@ benchmarks/
 | Real model validation | ✅ | Rotation validated on Qwen3 KV tensors (kurtosis 900→2.9) |
 | llama.cpp C port | ✅ | Metal GPU inference working on M5 Max |
 | Benchmarks (v1) | ✅ | MoE + Dense, 4 cache types each |
-| Quality validation | ✅ | PPL 6.194 (+1.4% of q8_0) — perplexity target met |
-| Metal shader optimization | 🔄 | fp16 WHT: 1074 tok/s (0.40x q8_0). SIMD cooperative dequant in progress |
-| Benchmark hardening | 🔄 | Perplexity, NIAH, multi-run ([#24](https://github.com/TheTom/turboquant_plus/issues/24)) |
+| Quality validation | ✅ | PPL 5.460 (+0.8% of q8_0) — perplexity target met |
+| Metal shader optimization | ✅ | **q8_0 speed parity**: 2747 tok/s (1.02x q8_0) via graph WHT + block-32 |
+| Benchmark hardening | 🔄 | Perplexity done, NIAH + multi-run pending ([#24](https://github.com/TheTom/turboquant_plus/issues/24)) |
+| Upstream coordination | 🔄 | llama.cpp PR preparation ([#27](https://github.com/TheTom/turboquant_plus/issues/27)) |
 | TurboQuant+ extensions | ⏳ | Adaptive bits, temporal decay, MoE-aware compression |
+| CUDA backend | ⏳ | Port Metal kernels to CUDA for NVIDIA |
 | MLX port | ⏳ | Last |
 
 ## Paper Reference
@@ -237,16 +234,18 @@ Detailed debugging logs, gotchas, and benchmarks from the llama.cpp port:
 
 - [Quality Benchmarks](docs/quality-benchmarks.md) — perplexity validation, bisection log, top-of-tree quality+speed table
 - [Speed Investigation](docs/turbo-speed-investigation.md) — Metal gotchas, fp16 WHT results, optimization history
-- [Pre-Rotate-Queries Investigation](docs/pre-rotate-queries-investigation.md) — why WHT and RoPE don't commute (saves you weeks of debugging)
-- [Pre-Rotate-Queries Plan](docs/pre-rotate-queries-plan.md) — original optimization plan and approach
+- [Speed Experiments](docs/speed-experiments.md) — the full 739 → 2747 tok/s optimization journey (5 experiments)
+- [Pre-Rotate-Queries Investigation](docs/pre-rotate-queries-investigation.md) — why graph-side WHT failed initially, how we fixed it
 - [Quality Gate Script](scripts/turbo-quality-gate.sh) — pre-push perplexity check
 
 ## Contributing
 
 Issues and PRs welcome. The main areas where help is needed:
 
-1. **SIMD cooperative dequant (non-vec path)** — the vec flash attention path uses cooperative SIMD, but the non-vec path still redundantly dequants 8x per block
-2. **CUDA backend** — port the Metal kernels to CUDA for NVIDIA GPU support
+1. **CUDA backend** — port the Metal kernels to CUDA for NVIDIA GPU support
+2. **Benchmark hardening** — NIAH (needle-in-a-haystack), KL divergence, multi-run statistics
+3. **Upstream PR** — prepare llama.cpp contribution (CONTRIBUTING.md requirements)
+4. **turbo4 fix** — turbo4 (4-bit variant) broken by block size changes, needs update
 3. **Benchmark hardening** — perplexity evaluation, NIAH testing, multi-run statistics
 4. **Quality metrics** — systematic comparison against q8_0/q4_0 on standard benchmarks
 

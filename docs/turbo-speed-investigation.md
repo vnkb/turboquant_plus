@@ -378,23 +378,29 @@ Attempted to move WHT inverse rotation from dequant to graph-level ops. Goal: el
 - Codex caught: `clear(true)` zeros rotation tensors without reinit (fixed)
 - Codex caught: header comments had wrong matrix orientation (fixed)
 
-**Current state:** Dequant inverse rotation restored. PPL = 6.194. Speed = ~10.7 tok/s.
+**Previous state:** Dequant inverse rotation restored. PPL = 6.194. Speed = ~10.7 tok/s.
 
-**Root cause found (Gemini 3 Pro):** WHT and RoPE don't commute. KV stores WHT(RoPE(K)) but graph rotation gives RoPE(WHT(Q)). Fix: apply WHT after RoPE inside attention layer, not in build_attn_mha.
+**Root cause found (Gemini 3 Pro, later disproven):** Initially thought WHT/RoPE don't commute. Actual fix: corrected ggml column-major storage orientation for rotation matrices, then applied WHT in build_attn after RoPE.
 
-## FP16 WHT Optimization (2026-03-25)
+## Speed Optimization Session (2026-03-25) — 739 → 2747 tok/s
 
-Switched WHT inverse rotation from fp32 to fp16 (Metal native half precision). Centroids fit in fp16 (max |val| = 0.19). Butterfly add/sub stays within fp16 range.
+### Step 1: FP16 WHT (739 → 1074, +45%)
+Switched WHT butterfly from fp32 to fp16. Centroids fit in fp16 (max |val| = 0.19).
 
-Also implemented cooperative SIMD dequant for flash_attn_ext_vec (t4) path: each of 32 SIMD lanes unpacks only its 4 elements, then WHT butterfly runs across lanes via simd_shuffle.
+### Step 2: Half4 Vectorized Butterfly (1074 → 1411, +31%)
+Rewrote WHT to operate on 32 x half4 vectors. Stages h=1,2 use intra-vector swizzle. Stages h=4+ use inter-vector exchange with computed stride.
 
-### Prefill Speed Results (Qwen3.5-35B-A3B, wikitext-2, 32 chunks)
+### Step 3: Graph-Side WHT Rotation (1411 → 2095, +48%)
+Moved WHT from per-block dequant to graph-level ggml_mul_mat. Q rotation in build_attn (after RoPE, before build_attn_mha). V un-rotation after build_attn_mha. Dequant becomes simple centroid lookup.
+
+### Step 4: Block-32 Storage (2095 → 2747, +31%)
+With WHT removed from dequant, reduced block size from 128 to 32. Matches q4_0 GPU parallelism. nl drops from 8 to 2 (non-vec) and 32 to 8 (vec).
+
+### Final Results (Qwen3.5-35B-A3B, wikitext-2, 32 chunks)
 
 | Config | Prefill tok/s | vs q8_0 | PPL |
 |--------|-------------|---------|-----|
-| q8_0 baseline | 2694 | 1.00x | 5.41 |
-| turbo3 no rotation | 1577 | 0.59x | - |
-| turbo3 fp32 WHT (old) | 739 | 0.27x | 5.46 |
-| **turbo3 fp16 WHT** | **1074** | **0.40x** | **5.47** |
+| q8_0 baseline | 2694 | 1.00x | 5.414 |
+| **turbo3 (block-32 + graph WHT)** | **2747** | **1.02x** | **5.460** |
 
-**45% speedup from fp16 WHT.** Gap to q8_0 narrowed from 3.65x to 2.51x. PPL within 0.06 of baseline.
+**q8_0 speed parity. 4.6x compression. 0.8% quality loss. 3.72x total speedup.**

@@ -252,36 +252,44 @@ Pre-rotate-queries never executed because:
 2. MoE hybrid memory context fails dynamic_cast to llama_kv_cache_context
 
 ### Current state
-- Inverse rotation restored in dequant with fp16 WHT butterfly (correct quality, faster)
-- Pre-rotate-queries abandoned: WHT and RoPE don't commute (Gemini 3 Pro insight)
-- Speed optimized via fp16 WHT + SIMD cooperative dequant
+- Graph-side WHT rotation: Q rotated via ggml_mul_mat after RoPE, V un-rotated after attention
+- Block-32 storage: dequant is simple centroid lookup (no WHT), matches q4_0 GPU parallelism
+- q8_0 speed parity achieved
 
 ## Top-of-Tree Quality and Speed (2026-03-25)
 
 Model: Qwen3.5-35B-A3B-Q8_0 | Hardware: Apple M5 Max 128GB | Flash Attention ON
 
-### Quality (wikitext-2, 512 context, 8 chunks)
+### Quality (wikitext-2, 512 context)
 
-| Cache Type | Bits/val | Compression | Perplexity | vs q8_0 |
-|------------|----------|-------------|------------|---------|
-| f16 | 16 | 1.0x | 6.121 | -0.16% |
-| q8_0 | 8 | 2.0x | 6.111 | baseline |
-| q4_0 | 4 | 4.0x | 6.142 | +0.51% |
-| **turbo3** | **3.25** | **4.9x** | **6.195** | **+1.4%** |
+| Cache Type | Bits/val | Compression | PPL (32-chunk) | PPL (8-chunk) | vs q8_0 |
+|------------|----------|-------------|----------------|---------------|---------|
+| f16 | 16 | 1.0x | — | 6.121 | -0.16% |
+| q8_0 | 8 | 2.0x | 5.414 ± 0.140 | 6.111 ± 0.326 | baseline |
+| q4_0 | 4 | 4.0x | — | 6.142 | +0.51% |
+| **turbo3** | **3.5** | **4.6x** | **5.460 ± 0.141** | **6.193 ± 0.332** | **+0.8-1.3%** |
 
 ### Speed (wikitext-2, 512 context, 32 chunks prefill)
 
-| Cache Type | Prefill tok/s | vs q8_0 | Notes |
-|------------|--------------|---------|-------|
-| q8_0 | 2694 | 1.00x | baseline |
-| turbo3 (no rot) | 1577 | 0.59x | rotation stripped (wrong quality) |
-| turbo3 (fp32 WHT) | 739 | 0.27x | old, before fp16 optimization |
-| **turbo3 (fp16 WHT)** | **1074** | **0.40x** | **current top-of-tree** |
+| Cache Type | Prefill tok/s | vs q8_0 |
+|------------|--------------|---------|
+| q8_0 | 2694 | 1.00x |
+| **turbo3 (block-32 + graph WHT)** | **2747** | **1.02x** |
+
+### Speed Optimization Journey (739 → 2747, 3.72x total)
+
+| Step | tok/s | vs q8_0 |
+|------|-------|---------|
+| fp32 WHT in dequant | 739 | 0.27x |
+| + fp16 WHT | 1074 | 0.40x |
+| + half4 vectorized butterfly | 1411 | 0.52x |
+| + graph-side WHT rotation | 2095 | 0.78x |
+| **+ block-32 storage** | **2747** | **1.02x** |
 
 ### Summary
-- **4.9x compression, 1.4% quality loss, 40% of q8_0 prefill speed**
-- fp16 WHT gave 45% speedup over fp32 WHT
-- Remaining speed gap: 2.51x vs q8_0 (from redundant full-block dequant in non-vec FA path)
+- **4.6x compression, <1.3% quality loss, q8_0 speed parity**
+- Key breakthrough: moving WHT from per-block dequant to graph-level ggml_mul_mat
+- See [Speed Experiments](speed-experiments.md) for the full journey
 
 ## Current State Summary (after quality fix)
 
