@@ -8,3 +8,10 @@ build/
 *.egg
 notes/
 .coverage
+htmlcov/
+coverage.xml
+.mypy_cache/
+.DS_Store
+*.so
+*.dylib
+.ipynb_checkpoints/

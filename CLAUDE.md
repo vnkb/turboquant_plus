@@ -124,11 +124,11 @@ Every change follows this loop. No shortcuts, no skipping steps.
    ↓
 7. Review the fixes
    ↓
-8. Verify all tests pass: python3 -m pytest tests/ -v
+8. Verify all tests pass locally: python3 -m pytest tests/ -v
    ↓
-9. CI must be green before commit
+9. Commit with issue reference (e.g., "feat: PolarQuant codebook #3")
    ↓
-10. Commit with issue reference (e.g., "feat: PolarQuant codebook #3")
+10. Push — CI must be green before merging to main
    ↓
 11. Close GitHub Issue with resolution comments
 ```
