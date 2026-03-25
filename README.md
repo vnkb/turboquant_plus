@@ -219,7 +219,7 @@ benchmarks/
 | llama.cpp C port | ✅ | Metal GPU inference working on M5 Max |
 | Benchmarks (v1) | ✅ | MoE + Dense, 4 cache types each |
 | Quality validation | ✅ | PPL 6.194 (+1.4% of q8_0) — perplexity target met |
-| Metal shader optimization | 🔄 | 10.7 tok/s (8× gap). Pre-rotate-queries needs GQA per-head reshape |
+| Metal shader optimization | 🔄 | fp16 WHT: 1074 tok/s (0.40x q8_0). SIMD cooperative dequant in progress |
 | Benchmark hardening | 🔄 | Perplexity, NIAH, multi-run ([#24](https://github.com/TheTom/turboquant_plus/issues/24)) |
 | TurboQuant+ extensions | ⏳ | Adaptive bits, temporal decay, MoE-aware compression |
 | MLX port | ⏳ | Last |
@@ -231,11 +231,20 @@ benchmarks/
 - **QJL**: [arXiv 2406.03482](https://arxiv.org/abs/2406.03482)
 - **Google Research Blog**: [TurboQuant: Redefining AI Efficiency](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
 
+## Engineering Docs
+
+Detailed debugging logs, gotchas, and benchmarks from the llama.cpp port:
+
+- [Quality Benchmarks](https://github.com/TheTom/llama-cpp-turboquant/blob/feature/turboquant-kv-cache/docs/quality-benchmarks.md) — perplexity validation, bisection log, top-of-tree quality+speed table
+- [Speed Investigation](https://github.com/TheTom/llama-cpp-turboquant/blob/feature/turboquant-kv-cache/docs/turbo-speed-investigation.md) — Metal gotchas, fp16 WHT results, optimization history
+- [Pre-Rotate-Queries Investigation](https://github.com/TheTom/llama-cpp-turboquant/blob/feature/turboquant-kv-cache/docs/pre-rotate-queries-investigation.md) — why WHT and RoPE don't commute (saves you weeks of debugging)
+- [Quality Gate Script](https://github.com/TheTom/llama-cpp-turboquant/blob/feature/turboquant-kv-cache/scripts/turbo-quality-gate.sh) — pre-push perplexity check
+
 ## Contributing
 
 Issues and PRs welcome. The main areas where help is needed:
 
-1. **Metal shader optimization** — reduce the O(d²) per-chunk rotation to O(d log d) using Walsh-Hadamard
+1. **SIMD cooperative dequant (non-vec path)** — the vec flash attention path uses cooperative SIMD, but the non-vec path still redundantly dequants 8x per block
 2. **CUDA backend** — port the Metal kernels to CUDA for NVIDIA GPU support
 3. **Benchmark hardening** — perplexity evaluation, NIAH testing, multi-run statistics
 4. **Quality metrics** — systematic comparison against q8_0/q4_0 on standard benchmarks
