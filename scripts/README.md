@@ -297,6 +297,14 @@ bash scripts/turbo-diag ~/llama.cpp ~/models/model.gguf -v -o ~/diag-results/
 
 ---
 
+## Before You Run
+
+**Plug in your charger and close heavy apps.** On Apple Silicon Macs, battery power triggers CPU/GPU throttling that produces artificially low speed numbers — we observed 2-3x slower benchmarks on an M5 Max running on battery vs plugged in. The diagnostic will detect throttling (`CPU_Speed_Limit` in Section 12), but the damage is already done to earlier results. NVIDIA laptops have similar power management behavior.
+
+Close Chrome, video calls, and anything GPU-heavy before running. The diagnostic captures top CPU/GPU consumers (Section 2), so interference will be visible in the log, but clean results are always better.
+
+---
+
 ## Troubleshooting
 
 ### "turbo3 not recognized" or cache type errors
