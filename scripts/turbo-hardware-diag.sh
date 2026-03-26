@@ -75,6 +75,63 @@ subsection() {
     echo "--- $1 ---"
 }
 
+# Background monitor — polls system metrics every 10 seconds during benchmarks.
+# Writes to a separate file that gets included in the zip.
+MONITOR_LOG="turbo-monitor-${DATE}.csv"
+MONITOR_PID=""
+
+start_monitor() {
+    # CSV header
+    echo "timestamp,load_1m,mem_pressure_pct,swap_used_mb,gpu_temp_c,cpu_speed_limit,gpu_mem_used_mb,gpu_util_pct" > "$MONITOR_LOG"
+
+    (
+        while true; do
+            ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            load_1m=$(uptime | sed 's/.*load averages*: *//' | cut -d' ' -f1 | tr -d ',')
+
+            gpu_mem="N/A"
+            gpu_util="N/A"
+
+            if [ "$(uname -s)" = "Darwin" ]; then
+                # Memory pressure (percentage of used pages)
+                mem_pct=$(vm_stat 2>/dev/null | awk '
+                    /Pages active/ {a=$3} /Pages wired/ {w=$4} /Pages free/ {f=$3}
+                    END {gsub(/\./,"",a); gsub(/\./,"",w); gsub(/\./,"",f);
+                         total=a+w+f; if(total>0) printf "%.0f", (a+w)*100/total; else print "0"}')
+                swap_mb=$(sysctl -n vm.swapusage 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="used") {gsub(/M/,"",$(i+2)); print $(i+2)}}' 2>/dev/null || echo "0")
+                gpu_temp="N/A"  # macOS doesn't expose GPU temp without sudo
+                cpu_limit=$(pmset -g therm 2>/dev/null | awk '/CPU_Speed_Limit/ {print $3}' || echo "100")
+                # macOS unified memory — GPU shares system RAM
+                gpu_mem="unified"
+            elif [ "$(uname -s)" = "Linux" ]; then
+                mem_pct=$(free 2>/dev/null | awk '/Mem:/ {printf "%.0f", $3*100/$2}' || echo "0")
+                swap_mb=$(free -m 2>/dev/null | awk '/Swap:/ {print $3}' || echo "0")
+                gpu_temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null || cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null | awk '{printf "%.1f", $1/1000}' || echo "N/A")
+                cpu_limit="N/A"
+                # NVIDIA GPU memory + utilization
+                gpu_mem=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "N/A")
+                gpu_util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "N/A")
+            else
+                mem_pct="0"; swap_mb="0"; gpu_temp="N/A"; cpu_limit="N/A"
+            fi
+
+            echo "${ts},${load_1m},${mem_pct},${swap_mb},${gpu_temp},${cpu_limit},${gpu_mem},${gpu_util}" >> "$MONITOR_LOG"
+            sleep 10
+        done
+    ) &
+    MONITOR_PID=$!
+}
+
+stop_monitor() {
+    if [ -n "$MONITOR_PID" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+        kill "$MONITOR_PID" 2>/dev/null
+        wait "$MONITOR_PID" 2>/dev/null || true
+    fi
+    local lines
+    lines=$(wc -l < "$MONITOR_LOG" 2>/dev/null | tr -d ' ')
+    echo "[MONITOR] Captured $lines samples in $MONITOR_LOG"
+}
+
 # Capture system load snapshot (no PII)
 capture_load() {
     local label="$1"
@@ -181,10 +238,14 @@ echo ""
 # --- Start capture ---
 exec > >(tee "$OUTFILE") 2>&1
 
-echo "TURBO_DIAG_VERSION=3"
+echo "TURBO_DIAG_VERSION=4"
 echo "TURBO_DIAG_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "TURBO_DIAG_MODEL=$(basename "$MODEL")"
 echo "TURBO_DIAG_MODEL_SIZE=$(ls -lh "$MODEL" 2>/dev/null | awk '{print $5}' || echo "unknown")"
+
+# Start background system monitor (polls every 10s: load, memory, swap, GPU temp)
+start_monitor
+trap 'stop_monitor' EXIT
 
 # ===================================================================
 section "1. HARDWARE INVENTORY (no PII)"
@@ -299,6 +360,24 @@ ps -eo pcpu,comm 2>/dev/null | sort -rn | head -10 | sed 's/^/[LOAD_TOP] /' || t
 subsection "Disk I/O"
 if command -v iostat &>/dev/null; then
     iostat -c 1 2>/dev/null | head -5 | sed 's/^/[LOAD_IO] /' || true
+fi
+
+# GPU-using processes (detect interference from browsers, video, etc.)
+subsection "GPU-using processes"
+if [ "$PLATFORM" = "Darwin" ]; then
+    # On macOS, check for WindowServer, Chrome GPU, etc.
+    ps -eo pcpu,comm 2>/dev/null | grep -iE "windowserver|gpu|metal|render|chrome.*helper" | sort -rn | head -5 | sed 's/^/[LOAD_GPU_PROC] /' || echo "[LOAD_GPU_PROC] none detected"
+elif [ "$PLATFORM" = "Linux" ] && command -v nvidia-smi &>/dev/null; then
+    nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null | sed 's/^/[LOAD_GPU_PROC] /' || echo "[LOAD_GPU_PROC] none detected"
+fi
+
+# Model mmap status (paging from disk kills decode performance)
+subsection "Model file mmap check"
+echo "[MMAP] model_path=$MODEL"
+echo "[MMAP] model_on_ssd=$([ "$PLATFORM" = "Darwin" ] && diskutil info "$(df "$MODEL" | tail -1 | awk '{print $1}')" 2>/dev/null | grep -q "Solid State" && echo "true" || echo "unknown")"
+# Check if model file is in unified buffer cache (hot in RAM)
+if [ "$PLATFORM" = "Darwin" ]; then
+    echo "[MMAP] model_size_vs_free_ram=$(ls -l "$MODEL" | awk '{mb=$5/1048576; printf "%.0f MB", mb}') model, $(vm_stat 2>/dev/null | awk '/Pages free/ {f=$3} /Pages inactive/ {i=$3} END {gsub(/\./,"",f); gsub(/\./,"",i); printf "%.0f MB free", (f+i)*16384/1048576}')"
 fi
 
 # ===================================================================
@@ -570,6 +649,9 @@ echo "END OF DIAGNOSTIC"
 # Note: tee continues capturing through packaging — this is fine,
 # the zip commands are useful to have in the log too.
 
+# Stop background monitor before packaging
+stop_monitor
+
 echo ""
 echo "Packaging results..."
 
@@ -578,11 +660,17 @@ ZIPFILE="turbo-diag-${DATE}.zip"
 # Collect all diagnostic artifacts
 zip -j "$ZIPFILE" "$OUTFILE" 2>/dev/null
 
+# Add monitor CSV (continuous polling data for thermal/memory analysis)
+if [ -f "$MONITOR_LOG" ]; then
+    zip -j "$ZIPFILE" "$MONITOR_LOG" 2>/dev/null
+    rm -f "$MONITOR_LOG"
+fi
+
 # Add a machine-readable hardware profile for replay testing
 PROFILE="turbo-hwprofile-${DATE}.json"
 cat > "$PROFILE" << HWEOF
 {
-  "diag_version": 3,
+  "diag_version": 4,
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "platform": "$PLATFORM",
   "os_version": "$(uname -r)",
