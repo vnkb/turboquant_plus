@@ -7,7 +7,11 @@ Hardware profiling, benchmarking, and quality validation for TurboQuant cache ty
 ## Quick Start
 
 ```bash
-# Clone and run — one command
+# 1. Clone the repo
+git clone https://github.com/TheTom/turboquant_plus.git
+cd turboquant_plus
+
+# 2. Run the diagnostic
 bash scripts/turbo-diag /path/to/llama.cpp /path/to/model.gguf
 ```
 
