@@ -480,7 +480,9 @@ def query_needle(
             {"role": "user", "content": user_content},
         ],
         "temperature": 0,
-        "max_tokens": 32,
+        "max_tokens": 64,
+        # Disable thinking mode (Qwen3.5 etc.) — we want the answer directly
+        "enable_thinking": False,
     }).encode()
 
     headers = {
@@ -492,7 +494,10 @@ def query_needle(
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
-                return data["choices"][0]["message"]["content"].strip()
+                content = data["choices"][0]["message"]["content"] or ""
+                # Strip thinking tags if model uses <think>...</think> mode
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+                return content.strip()
         except (urllib.error.URLError, ConnectionError, OSError) as e:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
