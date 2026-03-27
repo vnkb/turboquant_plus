@@ -228,3 +228,35 @@ Flipped computation: instead of per-element centroid lookup, iterate over 4 cent
 | 12 | Non-vec FA | 10.2 | 42% | Wrong kernel |
 | 13 | Fused block dot | 8.1 | 33% | 64 comparisons |
 | — | Ceiling (no dequant) | 24.5 | 100% | Zero overhead |
+
+## M5 Max Long-Context Discovery (2026-03-27)
+
+### The constant cache bottleneck hits M5 Max too at long context
+
+| Depth | Ceiling | Reads only | Full dequant | q8_0 | LUT cost | Ceiling vs q8_0 |
+|-------|---------|-----------|-------------|------|----------|----------------|
+| 8K | 78.9 | 75.2 | 59.2 | 78.8 | 20% | 1.00x |
+| 16K | 75.9 | 74.7 | 58.7 | 72.0 | 21% | 1.05x |
+| 32K | 78.3 | 71.9 | 47.1 | 61.0 | **34%** | **1.28x** |
+
+**turbo3 with zero dequant is 28% FASTER than q8_0 at 32K on M5 Max.** The compressed cache bandwidth advantage grows with context. The LUT cost explodes from 20% to 34% as context grows.
+
+### 4-mag vs 8-LUT on M5 Max across context depths
+
+| Depth | q8_0 | 8-LUT | 4-mag | 4-mag vs 8-LUT |
+|-------|------|-------|-------|----------------|
+| short | 85.0 | 76.7 | 76.2 | -0.7% |
+| 16K | 72.0 | 58.9 | **60.3** | **+2.4%** |
+| 32K | 61.0 | 47.6 | 44.1 | -7.3% |
+
+4-mag helps at 16K (+2.4%) but hurts at 32K (-7.3%) on M5. Crossover around 20K.
+
+### Context-adaptive dispatch (planned)
+Compile both 4-mag and 8-LUT FA kernel instantiations. At dispatch time, select based on KV cache size:
+- Pre-M5 (no tensor API): always 4-mag
+- M5+ with context < 8K: 8-LUT (minimal cache pressure)
+- M5+ with 8K-20K context: 4-mag (moderate pressure, 4-mag helps)
+- M5+ with context > 20K: 8-LUT (fully thrashed, ALU overhead dominates)
+
+### The real prize
+If we can reduce dequant cost from 34% to ~10% at 32K, turbo3 decode would be **FASTER than q8_0** at long context. The bandwidth advantage (28% at 32K) far exceeds the dequant overhead — we just need to close the gap. This flips the narrative from "turbo3 is slower but smaller" to "turbo3 is faster AND smaller."
