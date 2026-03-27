@@ -79,6 +79,28 @@ The 8 centroids have structure: 4 magnitudes × 2 signs. We split the 3-bit inde
 
 The XOR trick: for negative values (sign=0), the magnitude index is reversed (qs=0 → highest magnitude). `qs ^ 0x3` flips the 2-bit index without a branch.
 
+### Critical finding: On M2, branches cost MORE than divergent constant reads
+
+We tested 9 approaches total. The pattern is clear:
+
+| Approach | M2 8K | Constant reads | Branches | Result |
+|----------|-------|---------------|----------|--------|
+| **4-mag LUT** | **15.1** | **4 divergent** | **0** | **BEST** |
+| Batched extract (8-LUT) | 13.7 | 8 divergent | 0 | Good |
+| Deferred norm (4-mag) | 12.9 | 4 divergent | 0 | Lose ILP |
+| 2-pair half2 + ternary | 12.0 | 2 divergent | 4 | Branches hurt |
+| Select chain (zero LUT) | 11.9 | 0 | 8 | Branches kill |
+| Bit-arithmetic | 11.6 | 0 | 4+ | ALU too heavy |
+| Named-reg + ternary select | 10.3 | 4 uniform | 8 | Worst |
+| Main (8-entry LUT) | 10.95 | 8 divergent | 0 | Baseline |
+| Non-vec FA (nl=2) | 10.2 | 8 divergent | 0 | Wrong kernel |
+
+**Any approach that replaces constant reads with branches loses on M2.** The Apple8 GPU's branch predictor/execution is worse than its constant cache. The 4-mag LUT succeeds because it reduces constant addresses (4 vs 8) WITHOUT adding branches.
+
+### Per-element norm multiply is faster than deferred
+
+Deferring `float4 * norm` at the end (12.9 tok/s) is slower than per-element `v * norm` (15.1 tok/s). The per-element multiply provides ALU work that hides constant memory latency via instruction-level parallelism. The GPU can overlap the next constant read while the current multiply executes.
+
 ## Why CUDA Doesn't Have This Problem
 
 @spiritbuun's CUDA fork achieves 97.5% of q8_0 decode. The key difference:
