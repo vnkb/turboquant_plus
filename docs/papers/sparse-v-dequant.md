@@ -169,7 +169,7 @@ We swept the threshold $\tau$ across five values to determine sensitivity:
 
 **Short-context decode speed is flat** ($\pm 1$ tok/s, within measurement noise). At short context, attention is dense — few positions have weights below any of these thresholds, so the skip condition rarely triggers. The threshold's impact is context-dependent: the +22.8% improvement at 32K (Section 4.2) comes from the exponentially increasing fraction of near-zero weights at long context.
 
-**Conclusion:** $\tau = 10^{-6}$ remains the recommended default. More aggressive values ($10^{-4}$, $10^{-5}$) are equally safe quality-wise but offer no additional speed benefit at short context. The long-context gains are already captured at $10^{-6}$. Future work could validate $\tau = 10^{-4}$ on harder retrieval tasks (multi-needle NIAH at 128K+) to confirm no degradation before raising the default.
+**Conclusion:** $\tau = 10^{-6}$ remains the recommended default. More aggressive values ($10^{-4}$, $10^{-5}$) are equally safe quality-wise but offer no additional speed benefit at short context. The long-context gains are already captured at $10^{-6}$. Future work could validate $\tau = 10^{-4}$ on harder retrieval tasks (multi-needle NIAH at 128K+) to confirm no degradation before raising the default. Raw benchmark logs are available in [`threshold-ablation-logs/`](../threshold-ablation-logs/) and the full analysis in [`threshold-ablation.md`](../threshold-ablation.md).
 
 ---
 
