@@ -43,6 +43,44 @@ These configurations showed promising results in current Metal tests but have le
 
 turbo2-V showed promising results in current Metal tests, but has less validation than turbo4-V and turbo3-V. Treat it as experimental.
 
+### Boundary V (experimental, internal mode LA-V7)
+
+A layer-aware V compression strategy that protects boundary layers (first 2 + last 2) with q8_0-V while compressing all remaining layers with turbo2-V. Activated via `TURBO_LAYER_ADAPTIVE=7` env var.
+
+In current Metal testing across 4 models (phi-4-Q8_0, Qwen2.5-7B Q4_K_M, Qwen3.5-35B MoE Q8_0, Qwen3.5-27B Dense Q8_0), Boundary V consistently recovers 37-91% of the turbo2→turbo3 quality gap at effective compression between turbo2 and turbo3 (closer to turbo2 on deeper models). The benefit is largest on deep models where 4 boundary layers is a small fraction of total layers.
+
+| Model | Layers | turbo2 PPL | Boundary V PPL | turbo3 PPL | Quality recovered |
+|-------|--------|-----------|---------------|-----------|-------------------|
+| phi-4-Q8_0 | 40 | 4.835 | 4.784 | 4.742 | 55% |
+| Qwen2.5-7B Q4_K_M | 28 | 6.911 | 6.835 | 6.707 | 37% |
+| Qwen3.5-35B MoE | 64 | 5.257 | 5.148 | 5.137 | 91% |
+| Qwen3.5-27B Dense | 36 | 6.534 | 6.423 | 6.273 | 42% |
+
+Validated at 512 and 8K context. NIAH retrieval passed. No speed penalty. Effective V bits/val is 2.9-3.4 depending on model depth (between turbo2 and turbo3).
+
+Effective V compression is between turbo2 and turbo3, closer to turbo2 on deeper models.
+
+**How to try it:**
+
+```bash
+# Boundary V — boundary layers q8_0-V, rest turbo2-V
+TURBO_LAYER_ADAPTIVE=7 llama-server -m model.gguf -ctk q8_0 -ctv turbo2 -fa 1
+
+# Baseline comparison: uniform turbo2-V
+llama-server -m model.gguf -ctk q8_0 -ctv turbo2 -fa 1
+
+# Baseline comparison: uniform turbo3-V
+llama-server -m model.gguf -ctk q8_0 -ctv turbo3 -fa 1
+
+# PPL validation
+TURBO_LAYER_ADAPTIVE=7 llama-perplexity -m model.gguf -ngl 99 -fa 1 \
+  -ctk q8_0 -ctv turbo2 -f wikitext-2-raw/wiki.test.raw -c 512 --chunks 4
+```
+
+Expected result: PPL better than uniform `q8_0/turbo2`, usually behind uniform `q8_0/turbo3`.
+
+Treat as experimental. Not yet validated at 32K+ context or on CUDA. See [Layer-Aware V Compression](papers/layer-aware-v-compression.md) for the full writeup.
+
 ## Recommended Starting Points
 
 | Your situation | Start with | Why |
