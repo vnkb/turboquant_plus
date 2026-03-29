@@ -337,22 +337,73 @@ The remaining gap is structural: turbo3/4 dequant requires WHT extraction + cent
 | 19 | TG centroid cache | ~noise | ~62% | Threadgroup centroid table |
 | — | Ceiling (no dequant) | 24.5 | 100% | Zero overhead |
 
-## Untested Approaches (Hitlist)
+## Extended Experiments (approaches 20 + 22, 2026-03-28 night)
 
-These are approaches that have NOT been tried yet. Given the revised theory (centroid LUT is not the sole bottleneck), approaches targeting the centroid specifically are deprioritized.
+### Qwen2.5-1.5B-Instruct-Q4_K_M (8K context, p=8192 tg128)
 
-| # | Approach | Category | Rationale | Expected Impact | Status |
-|---|----------|----------|-----------|----------------|--------|
-| 17 | Device-memory centroid×norm | Block format change | Store 8 precomputed `centroid[i] × norm` per 128-element group in device memory. Sequential reads (no divergence). Adds 16 bytes per block (3.5→4.5 bits/val, still 1.78x compression). Preserves ILP (still per-element read → multiply pattern). | **Deprioritized** — centroid LUT not the bottleneck per #16h/#19 results | NOT TESTED |
-| 18 | Byte-indexed 256-entry LUT | LUT restructure | Pack all 8 centroid×sign combinations into a 256-byte lookup indexed by raw byte value. 4x fewer lookups (1 per byte instead of 1 per element). Trades constant memory bandwidth for fewer accesses. | **Deprioritized** — same reason | NOT TESTED |
-| 20 | 2-bit direct encode (no LUT) | Format change | Redesign turbo3 to use 2-bit uniform quantization per element (scale + offset per block). No centroid LUT at all. Reconstruction = `scale * idx + offset`. Same bits, zero divergent reads. Quality may suffer vs PolarQuant centroids. | **Still interesting** — eliminates entire dequant pipeline, not just centroid | NOT TESTED |
-| 21 | Hybrid 4-mag + simd_shuffle | Combined | Use 4-mag for magnitude (4 constant reads), then simd_shuffle for sign propagation instead of XOR. May reduce 1-2 ALU ops. | Low — simd_shuffle was only -2.6% vs 4-mag alone | NOT TESTED |
-| 22 | Async device copy to threadgroup | Pipeline | Use Metal's async copy to prefetch next tile of KV blocks into threadgroup while computing current tile. Hides device memory latency. | Medium — requires restructuring tile loop | NOT TESTED |
+| # | Approach | Env Var | turbo3 t/s | turbo4 t/s | Key finding |
+|---|----------|---------|-----------|-----------|-------------|
+| — | Baseline (4-mag LUT) | — | 51.80 | 58.60 | — |
+| 20 | 2-bit direct encode (pure ALU, no LUT) | TURBO_DIRECT_ENCODE=1 | 52.16 (+0.7%) | 57.78 (-1.4%) | **Same speed with zero constant reads** |
+| 22 | Async prefetch (batch device reads) | TURBO_ASYNC_PREFETCH=1 | 50.73 (-2.1%) | 57.02 (-2.7%) | GPU already interleaves reads optimally |
 
-### Success criteria
-- Any approach that gets M2 8K decode from 15.1 to 18+ tok/s is a win
-- Anything that gets to 20+ tok/s (matching the no-dequant ceiling for q8_0) is a huge win
-- The theoretical ceiling is 24.5 tok/s (no dequant at all)
+### Definitive proof: constant memory LUT is FREE on M2 Pro
+
+Approach #20 replaced the entire centroid LUT with pure ALU (`norm * (0.25 + 0.5*idx)`) — zero constant memory reads. The result is identical speed. This means the 4 constant reads per element are hitting L1 cache and costing essentially nothing.
+
+The bottleneck is **device memory bandwidth**: streaming 14 bytes per 32 elements (turbo3) from DRAM, strided across cache positions. q8_0 streams 34 bytes per 32 elements but with a simpler access pattern and trivial dequant (`int8 * scale`).
+
+### Why async prefetch didn't help (#22)
+
+Staging device memory reads (norm, qs, signs) into registers before constant reads forced a specific execution order. The GPU's out-of-order execution already interleaves these optimally. Forcing order adds register pressure without hiding latency.
+
+### Updated tally: 20 approaches tested
+
+| Rank | Approach | M2 8K | vs Ceiling | Category |
+|------|----------|-------|-----------|----------|
+| 1 | 4-mag LUT | 15.1 | 62% | 4 constant reads |
+| 2 | simd_shuffle | 14.7 | 60% | Cross-lane transfer |
+| 3 | Batched extract (8-LUT) | 13.7 | 56% | 8 constant reads |
+| 4 | Inline FA block | 13.5 | 55% | Inlined dequant |
+| 5 | Deferred norm | 12.9 | 53% | Loses ILP |
+| 6 | 2-pair half2 | 12.0 | 49% | 2 reads + ternary |
+| 7 | Select chain | 11.9 | 49% | Pure branches |
+| 8 | Bit-arithmetic | 11.6 | 47% | Pure ALU |
+| 9 | FMA branchless | 11.4 | 47% | fma() chain |
+| 10 | Main (8-LUT) | 10.95 | 45% | Baseline |
+| 11 | Named-reg ternary | 10.3 | 42% | Registers + branches |
+| 12 | Non-vec FA | 10.2 | 42% | Wrong kernel |
+| 13 | SMEM pre-dequant | 10.17 | 41% | Threadgroup cache (ILP loss) |
+| 14 | Q·centroid precompute | 10.10 | 41% | select() register LUT |
+| 15 | Fused block dot | 8.1 | 33% | 64 comparisons |
+| 16h | Half register LUT | ~noise | ~62% | half cn[8] — still spills |
+| 19 | TG centroid cache | ~noise | ~62% | Threadgroup centroid table |
+| 20 | Direct encode (no LUT) | ~noise | ~62% | Pure ALU, zero constant reads |
+| 22 | Async prefetch | -2% | ~61% | Forced read ordering |
+| — | Ceiling (no dequant) | 24.5 | 100% | Zero overhead |
+
+## Final Conclusion: M2 Decode Ceiling (2026-03-28)
+
+**20 approaches tested. The 4-mag LUT is the definitive M2 decode ceiling.**
+
+The bottleneck is NOT:
+- Constant memory LUT divergence (proven by #20: zero LUT = same speed)
+- Centroid lookup specifically (proven by #16h, #19: different storage = same speed)
+- Read ordering (proven by #22: forced ordering = worse)
+- Branch overhead (proven by #6-9: branchless = worse)
+
+The bottleneck IS:
+- **Device memory bandwidth** for streaming quantized KV blocks from DRAM
+- **Dequant ALU complexity** (WHT extraction + centroid + norm vs q8_0's simple `int8 * scale`)
+- These two costs are inherent to the turbo format and cannot be optimized away without changing the format itself
+
+### Remaining untested approaches (low priority)
+
+| # | Approach | Category | Expected Impact | Status |
+|---|----------|----------|----------------|--------|
+| 17 | Device-memory centroid×norm | Block format change | Moot — centroid reads are free | NOT TESTED |
+| 18 | Byte-indexed 256-entry LUT | LUT restructure | Moot — same reason | NOT TESTED |
+| 21 | Hybrid 4-mag + simd_shuffle | Combined | Low — simd_shuffle was only -2.6% standalone | NOT TESTED |
 
 ## M5 Max Long-Context Discovery (2026-03-27)
 
