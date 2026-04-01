@@ -54,6 +54,8 @@ Run a model with TurboQuant+ KV cache compression:
 
 Asymmetric: full precision K, compressed V. Safe on all tested models including sensitive ones like Qwen2.5.
 
+> **Known limitation:** Models with `head_dim=64` (e.g., GPT-OSS-120B) may crash or produce degraded output with turbo V compression. The WHT kernel requires sufficient dimensionality for CLT convergence, and d=64 is at the lower boundary. If you hit issues on a head_dim=64 model, fall back to `-ctk q8_0 -ctv q8_0` (no turbo compression). The paper validated at head_dim=128 and 256.
+
 ### More compression (works on most models)
 
 ```bash
