@@ -208,9 +208,9 @@ Post your numbers in the [GitHub discussion thread](https://github.com/ggml-org/
 
 Include: model name, weight quantization, GPU, VRAM, turbo config, PPL, and speed numbers.
 
-## Weight Compression (TQ4_1S) — Experimental, Metal Only
+## Weight Compression (TQ4_1S) — Experimental
 
-> **Backend support:** Weight compression (TQ4_1S) is currently **Metal (Apple Silicon) only**. The quantization step (llama-quantize) works on any platform, but the runtime dequant kernels (V2.1 fused SIMD) are Metal-specific. Compressed GGUF files will not run correctly on CUDA or HIP until those backends are ported. If you are a CUDA developer interested in contributing the port, please open an issue or DM [@no_stp_on_snek](https://x.com/no_stp_on_snek).
+> **Backend support:** Metal (Apple Silicon) and CUDA (NVIDIA). The quantization step (llama-quantize) works on any platform. HIP/ROCm is not yet ported. Windows MSVC is supported as of the latest PR.
 
 TQ4_1S applies WHT rotation + Lloyd-Max polar quantization to model weights (not just KV cache). This is post-training quantization -- no retraining or calibration required. Apply directly to Q8_0 GGUF models.
 
@@ -218,7 +218,53 @@ TQ4_1S applies WHT rotation + Lloyd-Max polar quantization to model weights (not
 
 See the [weight compression paper](papers/weight-compression-tq4.md) for full methodology and results.
 
-### How to Quantize
+### Quick Test (copy-paste, 5 minutes)
+
+Clone, build, compress a known-good model, and benchmark. Paste the llama-bench output back in the [PR #45 comments](https://github.com/TheTom/llama-cpp-turboquant/pull/45).
+
+```bash
+# 1. Clone and build from PR #45
+git clone https://github.com/TheTom/llama-cpp-turboquant.git
+cd llama-cpp-turboquant
+git checkout pr/tq4-weight-compression
+
+# Pick your backend:
+cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release    # Apple Silicon
+cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release     # NVIDIA
+cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+# 2. Download a known-good test model (Qwen3.5-27B Q8_0, 26.6 GB)
+#    Fits on 32GB+ VRAM. For 24GB cards, use Qwen2.5-7B-Instruct Q8_0 instead.
+huggingface-cli download Qwen/Qwen3.5-27B-GGUF qwen3.5-27b-q8_0.gguf --local-dir models/
+
+# 3. Compress with Config I
+python3 -c "
+n_layers = 64  # 64 for Qwen3.5-27B, 28 for Qwen2.5-7B
+boundary = 2
+for i in range(boundary, n_layers - boundary):
+    for t in ['attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate', 'ffn_up']:
+        print(f'blk.{i}.{t}.weight=tq4_1s')
+    print(f'blk.{i}.ffn_down.weight=q4_k')
+" > config_i.txt
+
+./build/bin/llama-quantize --allow-requantize --tensor-type-file config_i.txt \
+  models/qwen3.5-27b-q8_0.gguf models/qwen3.5-27b-config-i.gguf Q8_0
+
+# 4. Benchmark — run all 3 and paste the output in the PR
+./build/bin/llama-bench -m models/qwen3.5-27b-q8_0.gguf -fa 1 -ngl 99 -p 512 -n 128
+./build/bin/llama-bench -m models/qwen3.5-27b-config-i.gguf -fa 1 -ngl 99 -p 512 -n 128
+./build/bin/llama-bench -m models/qwen3.5-27b-config-i.gguf -ctk q8_0 -ctv turbo4 -fa 1 -ngl 99 -p 512 -n 128
+```
+
+Expected results (Qwen3.5-27B):
+- Q8_0 source: 26.6 GB
+- Config I output: ~19.1 GB (28% smaller)
+- Quality: +1.3% PPL
+- Speed (Metal): 94-102% of Q8_0. Speed (CUDA): varies by GPU, collecting data
+
+**What to report:** paste all 3 llama-bench outputs in [PR #45](https://github.com/TheTom/llama-cpp-turboquant/pull/45) along with your GPU model. Crashes, errors, or unexpected output are equally valuable.
+
+### How to Quantize (detailed)
 
 Create a tensor type file for your model, then quantize:
 
